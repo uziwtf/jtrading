@@ -7,15 +7,15 @@
   "rsi_period": 15,
   "rsi_buy_base": 33.0,
   "rsi_sell_base": 72.0,
-  "vol_window": 26,
-  "k_vol": -0.345863573274911,
+  "vol_window": 50,
+  "k_vol": -0.48589174480436215,
   "vol_anchor": 15.0,
-  "volatility": 15.02,
-  "buy_threshold": 33.01,
-  "sell_threshold": 71.99,
+  "volatility": 13.66,
+  "buy_threshold": 32.35,
+  "sell_threshold": 72.65,
   "signal": "持有",
   "signal_color": "#3b82f6",
-  "backtest_return": "266.13%",
-  "backtest_annual": "19.78%",
-  "timestamp": "2026-04-03 15:20:45 (北京时间)"
+  "backtest_return": "281.72%",
+  "backtest_annual": "20.47%",
+  "timestamp": "2026-04-05 15:17:57 (北京时间)"
 }
