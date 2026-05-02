@@ -10,7 +10,7 @@
   "signal": "持有",
   "signal_color": "#3b82f6",
   "strategy": "RSI(15) EMA 32/77",
-  "backtest_return": "260.99%",
-  "backtest_annual": "19.43%",
-  "timestamp": "2026-05-02 12:20:57 (北京时间)"
+  "backtest_return": "263.13%",
+  "backtest_annual": "19.37%",
+  "timestamp": "2026-05-02 15:03:52 (北京时间)"
 }
