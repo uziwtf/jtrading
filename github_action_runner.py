@@ -1,54 +1,42 @@
 import os
 import json
-import smtplib
-from email.mime.text import MIMEText
-from email.header import Header
 from datetime import datetime, timedelta
+
 import requests
 import pandas as pd
 import numpy as np
 
-# ==========================================
-# 配置读取 (优先从环境变量读取)
-# ==========================================
-SMTP_SERVER = os.environ.get("SMTP_SERVER", "smtp.126.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 465))
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
-SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD")
-# Server酱 Key
-SERVERCHAN_KEY = os.environ.get("SERVERCHAN_KEY")
-# Gist 订阅者列表配置
-GIST_SUBSCRIBERS_URL = os.environ.get("GIST_SUBSCRIBERS_URL")
-GIST_TOKEN = os.environ.get("GIST_TOKEN")
+from data_fetcher import update_etf_data
 
 # ==========================================
-# 最优策略参数配置 (来自回测优化结果)
-# RSI(15) EMA 32/77 - 联结基金模式（理论最优）
-# 总收益268.02%, 年化20.90%
-# 注：联结基金可小数份额申购，ETF需100份整手交易
+# 配置
 # ==========================================
-ETF_CODE = "512890"  # 红利低波ETF
+ETF_CODE = "512890"
 ETF_NAME = "红利低波ETF"
-RSI_PERIOD = 15  # RSI周期（使用EMA平滑）
-RSI_BUY_THRESHOLD = int(os.environ.get("RSI_BUY_THRESHOLD", 32))  # 买入阈值
-RSI_SELL_THRESHOLD = int(os.environ.get("RSI_SELL_THRESHOLD", 77))  # 卖出阈值
 
 BEST_PARAMS_PATH = os.path.join("backtest", "best_combined_params.json")
 BACKTEST_RESULT_PATH = os.path.join("backtest", "backtest_result.json")
 
+FEISHU_WEBHOOK = os.environ.get(
+    "FEISHU_WEBHOOK",
+    "https://open.feishu.cn/open-apis/bot/v2/hook/3efc8c66-ae0e-4f08-881a-670cc3d16681",
+)
+
+
+# ==========================================
+# 工具函数
+# ==========================================
 
 def load_json_file(file_path):
-    """安全读取 JSON 文件。"""
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
-        print(f"读取 {file_path} 失败: {e}")
+        print("read %s failed: %s" % (file_path, e))
         return None
 
 
 def load_backtest_summary():
-    """读取回测统计摘要，避免前端展示过期硬编码收益。"""
     data = load_json_file(BACKTEST_RESULT_PATH)
     stats = (data or {}).get("statistics", {})
     strategy_ideal = stats.get("strategy_ideal") or stats.get("strategy") or {}
@@ -62,10 +50,9 @@ def load_backtest_summary():
 
 
 def load_dynamic_params():
-    """读取动态策略最优参数；若缺失则回退到保守默认值。"""
     params = load_json_file(BEST_PARAMS_PATH) or {}
     return {
-        "rsi_period": int(params.get("rsi_period", RSI_PERIOD)),
+        "rsi_period": int(params.get("rsi_period", 15)),
         "rsi_buy_base": float(params.get("rsi_buy_base", 34)),
         "rsi_sell_base": float(params.get("rsi_sell_base", 72)),
         "vol_window": int(params.get("vol_window", 20)),
@@ -74,11 +61,24 @@ def load_dynamic_params():
     }
 
 
+# ==========================================
+# RSI + 波动率 计算
+# ==========================================
+
+def calculate_rsi_ema(prices, period):
+    delta = prices.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = (-delta).where(delta < 0, 0)
+    alpha = 1.0 / period
+    avg_gain = gain.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+
 def calculate_volatility_annualized(close_series, window):
-    """按回测口径计算年化波动率(%)。"""
     if close_series is None or len(close_series) < window + 1:
         return None
-
     log_ret = np.log(close_series / close_series.shift(1))
     vol = log_ret.rolling(window=window).std() * np.sqrt(252) * 100
     latest = vol.iloc[-1]
@@ -88,18 +88,13 @@ def calculate_volatility_annualized(close_series, window):
 
 
 def compute_dynamic_signal(rsi_value, close_series, params):
-    """基于 RSI + 波动率参数计算当日动态阈值与信号。"""
     vol = calculate_volatility_annualized(close_series, params["vol_window"])
     if vol is None or rsi_value is None:
         return None
 
     adjustment = params["k_vol"] * (vol - params["vol_anchor"])
-    buy_threshold = params["rsi_buy_base"] - adjustment
-    sell_threshold = params["rsi_sell_base"] + adjustment
-
-    # 与回测前端保持一致的阈值边界
-    buy_threshold = min(50.0, max(20.0, buy_threshold))
-    sell_threshold = min(90.0, max(60.0, sell_threshold))
+    buy_threshold = min(50.0, max(20.0, params["rsi_buy_base"] - adjustment))
+    sell_threshold = min(90.0, max(60.0, params["rsi_sell_base"] + adjustment))
 
     if rsi_value < buy_threshold:
         signal = "买入"
@@ -108,7 +103,7 @@ def compute_dynamic_signal(rsi_value, close_series, params):
         signal = "卖出"
         signal_color = "#ef4444"
     else:
-        signal = "持有"
+        signal = "仓位不动"
         signal_color = "#3b82f6"
 
     return {
@@ -119,293 +114,168 @@ def compute_dynamic_signal(rsi_value, close_series, params):
         "signal_color": signal_color,
     }
 
-def fetch_subscriber_emails():
-    """
-    从私有 Gist 获取订阅者邮箱列表
-    如果 Gist 配置不存在，则回退到环境变量 SUBSCRIBER_EMAILS
-    """
-    # 优先从 Gist 读取
-    if GIST_SUBSCRIBERS_URL and GIST_TOKEN:
-        try:
-            headers = {
-                'Authorization': f'token {GIST_TOKEN}',
-                'Accept': 'application/vnd.github.v3.raw'
-            }
-            response = requests.get(GIST_SUBSCRIBERS_URL, headers=headers, timeout=10)
-            if response.status_code == 200:
-                # 支持每行一个邮箱或逗号分隔
-                content = response.text.strip()
-                emails = []
-                for line in content.split('\n'):
-                    line = line.strip()
-                    if line and not line.startswith('#'):  # 忽略空行和注释
-                        # 支持逗号分隔的多个邮箱
-                        emails.extend([e.strip() for e in line.split(',') if e.strip()])
-                print(f"从 Gist 获取到 {len(emails)} 个订阅者邮箱")
-                return emails
-            else:
-                print(f"从 Gist 获取邮箱失败: HTTP {response.status_code}")
-        except Exception as e:
-            print(f"从 Gist 获取邮箱出错: {e}")
-    
-    # 回退到环境变量
-    fallback_emails = os.environ.get("SUBSCRIBER_EMAILS", "")
-    if fallback_emails:
-        emails = [e.strip() for e in fallback_emails.split(",") if e.strip()]
-        print(f"使用环境变量 SUBSCRIBER_EMAILS，共 {len(emails)} 个订阅者")
-        return emails
-    
-    return []
 
-def calculate_rsi_ema(prices, period):
-    """
-    计算RSI指标（使用EMA平滑，更敏感）
-    与回测代码保持一致
-    """
-    delta = prices.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = (-delta).where(delta < 0, 0)
-    
-    # 使用EMA而非SMA（更敏感）
-    alpha = 1 / period  # EMA平滑因子
-    avg_gain = gain.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+# ==========================================
+# 飞书通知
+# ==========================================
 
-
-def fetch_etf_data(code, days=60):
-    """
-    使用 akshare 获取ETF历史数据
-    返回最近N天的数据用于计算RSI
-    """
-    import akshare as ak
-    
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 开始获取 {code} 数据...")
-    
+def send_feishu(title, content):
+    payload = {
+        "msg_type": "interactive",
+        "card": {
+            "header": {
+                "title": {"tag": "plain_text", "content": title},
+            },
+            "elements": [
+                {"tag": "markdown", "content": content},
+            ],
+        },
+    }
     try:
-        # 获取ETF日线数据（前复权）
-        df = ak.fund_etf_hist_em(symbol=code, period="daily", adjust="qfq")
-        df['日期'] = pd.to_datetime(df['日期'])
-        df = df.rename(columns={
-            '日期': 'date',
-            '收盘': 'close'
-        })
-        df = df.sort_values('date').reset_index(drop=True)
-        
-        # 只取最近N天
-        df = df.tail(days).reset_index(drop=True)
-        
-        print(f"获取到 {len(df)} 条数据，从 {df['date'].min()} 到 {df['date'].max()}")
-        return df
-        
+        resp = requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
+        print("feishu response: %s" % resp.text)
     except Exception as e:
-        print(f"获取ETF数据失败: {e}")
-        return None
+        print("feishu send failed: %s" % e)
 
 
-def fetch_rsi_and_price():
-    """
-    获取 RSI 和 价格数据
-    使用自己计算的 RSI(15) EMA，与回测策略保持一致
-    """
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 开始获取数据...")
-    
-    # 获取ETF历史数据
-    df = fetch_etf_data(ETF_CODE, days=60)  # 获取60天数据，确保RSI计算准确
-    
-    if df is None or len(df) < RSI_PERIOD + 5:
-        print("无法获取足够的历史数据")
+# ==========================================
+# 数据获取（增量 + 多源）
+# ==========================================
+
+def fetch_rsi_and_price(params):
+    print("[%s] fetching data..." % datetime.now().strftime("%H:%M:%S"))
+
+    df = update_etf_data(ETF_CODE, max_rows=300)
+
+    rsi_period = params["rsi_period"]
+    if df is None or len(df) < rsi_period + 5:
+        print("insufficient data")
         return None, None, None, None
-    
-    # 计算RSI(15) EMA
-    df['rsi'] = calculate_rsi_ema(df['close'], RSI_PERIOD)
-    
-    # 获取最新的RSI和价格
+
+    df["rsi"] = calculate_rsi_ema(df["close"], rsi_period)
+
     latest = df.iloc[-1]
-    rsi_value = latest['rsi']
-    latest_price = latest['close']
-    latest_date = latest['date'].strftime('%Y-%m-%d')
-    
-    if pd.notna(rsi_value):
-        print(f"获取到 RSI({RSI_PERIOD}) EMA: {rsi_value:.2f}")
-        print(f"最新价格: {latest_price:.4f}")
-        print(f"数据日期: {latest_date}")
-    else:
-        print("RSI计算失败，数据不足")
+    rsi_value = latest["rsi"]
+    latest_price = latest["close"]
+    latest_date = latest["date"].strftime("%Y-%m-%d")
+
+    if pd.isna(rsi_value):
+        print("RSI calc failed")
         return None, None, None, None
-    
+
+    print("RSI(%d) = %.2f | price = %.4f | date = %s" % (
+        rsi_period, rsi_value, latest_price, latest_date))
     return rsi_value, latest_price, latest_date, df
 
-def send_email(to_email, subject, content):
-    """
-    发送邮件函数
-    """
-    if not SENDER_EMAIL or not SENDER_PASSWORD:
-        print("未配置发件人邮箱或密码，跳过发送邮件。")
-        return
 
-    # 构建 HTML 邮件内容
-    html_content = f"""
-    <html>
-    <body style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background-color: #f4f6f9; padding: 20px;">
-        <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; border-radius: 10px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
-            <h2 style="color: #2c3e50; margin-top: 0; border-bottom: 2px solid #3498db; padding-bottom: 10px;">{subject}</h2>
-            
-            <div style="font-size: 16px; line-height: 1.6; color: #34495e; margin: 20px 0;">
-                {content.replace(chr(10), '<br>')}
-            </div>
-            
-            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ecf0f1; font-size: 12px; color: #95a5a6; text-align: center;">
-                <p>此邮件由 GitHub Actions 自动发送，请勿直接回复。</p>
-                <p>
-                    如果您不想继续接收此类邮件，可以 
-                    <a href="mailto:{SENDER_EMAIL}?subject=取消订阅 RSI 监控&body=请将我的邮箱从订阅列表中移除" style="color: #e74c3c; text-decoration: none; font-weight: bold;">点击此处取消订阅</a>
-                </p>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+# ==========================================
+# 主逻辑
+# ==========================================
 
-    message = MIMEText(html_content, 'html', 'utf-8')
-    # RFC5322 要求 From 必须包含可解析的邮箱地址；使用“显示名 <邮箱>”格式
-    message['From'] = Header(f"RSI 监控助手 <{SENDER_EMAIL}>", 'utf-8')
-    message['To'] = Header(to_email, 'utf-8')
-    message['Subject'] = Header(subject, 'utf-8')
+def is_wednesday_beijing():
+    """判断当前北京时间是否为周三"""
+    beijing_now = datetime.utcnow() + timedelta(hours=8)
+    return beijing_now.weekday() == 2
 
-    try:
-        server = smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT)
-        server.login(SENDER_EMAIL, SENDER_PASSWORD)
-        server.sendmail(SENDER_EMAIL, [to_email], message.as_string())
-        server.quit()
-        print(f"邮件已发送至 {to_email}")
-    except Exception as e:
-        print(f"邮件发送失败: {e}")
-
-def send_wechat(title, content):
-    """
-    微信通知 (Server酱)
-    """
-    if not SERVERCHAN_KEY:
-        print("未配置 SERVERCHAN_KEY，跳过微信通知。")
-        return
-    
-    data = {'title': title,
-            'desp': content,
-            'channel': 9}
-    msg_url = f"https://sctapi.ftqq.com/{SERVERCHAN_KEY}.send"
-
-    try:
-        response = requests.post(msg_url, data=data)
-        print(f"微信通知发送结果: {response.text}")
-    except Exception as e:
-        print(f"微信通知发送失败: {e}")
 
 def main():
-    rsi, price, latest_date, market_df = fetch_rsi_and_price()
-    
+    dynamic_params = load_dynamic_params()
+    rsi, price, latest_date, market_df = fetch_rsi_and_price(dynamic_params)
+
     if rsi is None:
-        print("未能获取有效 RSI 数据，程序结束。")
+        print("no valid RSI data, exit.")
         return
 
-    print(f"当前状态: RSI={rsi}, 价格={price}")
+    dynamic_signal = compute_dynamic_signal(
+        rsi, market_df["close"] if market_df is not None else None, dynamic_params
+    )
 
-    subject = ""
-    content = ""
+    if dynamic_signal is None:
+        print("dynamic signal computation failed, exit.")
+        return
 
-    if rsi < RSI_BUY_THRESHOLD:
-        subject = f"【买入提醒】{ETF_NAME} RSI低于{RSI_BUY_THRESHOLD}"
-        content = f"""当前{ETF_NAME} ({ETF_CODE}) 的 RSI({RSI_PERIOD}) EMA 为 {rsi:.2f}，已低于 {RSI_BUY_THRESHOLD}，建议关注买入机会。
+    signal = dynamic_signal["signal"]
+    vol = dynamic_signal["volatility"]
+    buy_th = dynamic_signal["buy_threshold"]
+    sell_th = dynamic_signal["sell_threshold"]
 
-📊 策略参数:
-- RSI周期: {RSI_PERIOD}日 (EMA平滑)
-- 买入阈值: RSI < {RSI_BUY_THRESHOLD}
-- 卖出阈值: RSI > {RSI_SELL_THRESHOLD}
+    print("signal=%s | vol=%.2f | buy_th=%.2f | sell_th=%.2f" % (
+        signal, vol, buy_th, sell_th))
 
-💰 回测表现:
-- 总收益: 268.02%
-- 年化收益: 20.90%
+    backtest_summary = load_backtest_summary()
+    bt_return = "--"
+    bt_annual = "--"
+    if backtest_summary["dynamic_total"] is not None:
+        bt_return = "%.2f%%" % backtest_summary["dynamic_total"]
+    if backtest_summary["dynamic_annual"] is not None:
+        bt_annual = "%.2f%%" % backtest_summary["dynamic_annual"]
 
-当前价格: {price}"""
-    elif rsi > RSI_SELL_THRESHOLD:
-        subject = f"【卖出提醒】{ETF_NAME} RSI高于{RSI_SELL_THRESHOLD}"
-        content = f"""当前{ETF_NAME} ({ETF_CODE}) 的 RSI({RSI_PERIOD}) EMA 为 {rsi:.2f}，已高于 {RSI_SELL_THRESHOLD}，建议关注卖出风险。
+    # --- 通知逻辑 ---
+    if signal == "买入":
+        title = "【买入信号】%s RSI=%.2f < %.2f" % (ETF_NAME, rsi, buy_th)
+        content = (
+            "**%s (%s)**\n\n"
+            "RSI(%d) = **%.2f** < 动态买入阈值 **%.2f**\n\n"
+            "波动率: %.2f%% | 卖出阈值: %.2f\n\n"
+            "当前价格: **%.4f** | 数据日期: %s\n\n"
+            "回测总收益: %s | 年化: %s"
+        ) % (ETF_NAME, ETF_CODE, dynamic_params["rsi_period"], rsi, buy_th,
+             vol, sell_th, price, latest_date, bt_return, bt_annual)
+        send_feishu(title, content)
 
-📊 策略参数:
-- RSI周期: {RSI_PERIOD}日 (EMA平滑)
-- 买入阈值: RSI < {RSI_BUY_THRESHOLD}
-- 卖出阈值: RSI > {RSI_SELL_THRESHOLD}
+    elif signal == "卖出":
+        title = "【卖出信号】%s RSI=%.2f > %.2f" % (ETF_NAME, rsi, sell_th)
+        content = (
+            "**%s (%s)**\n\n"
+            "RSI(%d) = **%.2f** > 动态卖出阈值 **%.2f**\n\n"
+            "波动率: %.2f%% | 买入阈值: %.2f\n\n"
+            "当前价格: **%.4f** | 数据日期: %s\n\n"
+            "回测总收益: %s | 年化: %s"
+        ) % (ETF_NAME, ETF_CODE, dynamic_params["rsi_period"], rsi, sell_th,
+             vol, buy_th, price, latest_date, bt_return, bt_annual)
+        send_feishu(title, content)
 
-💰 回测表现:
-- 总收益: 268.02%
-- 年化收益: 20.90%
+    elif is_wednesday_beijing():
+        title = "【心跳】%s 策略正常运行" % ETF_NAME
+        content = (
+            "RSI(%d) = %.2f | 动态买入阈值 %.2f | 动态卖出阈值 %.2f | 波动率 %.2f%%\n\n"
+            "当前信号: **仓位不动** | 价格: %.4f | 数据日期: %s"
+        ) % (dynamic_params["rsi_period"], rsi, buy_th, sell_th, vol,
+             price, latest_date)
+        send_feishu(title, content)
 
-当前价格: {price}"""
     else:
-        print(f"RSI 在正常范围内 ({RSI_BUY_THRESHOLD}-{RSI_SELL_THRESHOLD})，无需发送提醒。")
+        print("signal=仓位不动, not Wednesday, skip notification.")
 
-    if subject:
-        print(f"触发条件，准备发送邮件: {subject}")
-        subscribers = fetch_subscriber_emails()
-        if not subscribers:
-            print("没有配置订阅者邮箱，无法发送。")
-        
-        for email in subscribers:
-            send_email(email, subject, content)
-            
-        # 发送微信通知
-        send_wechat(subject, content)
-
-    # ==========================================
-    # 生成静态数据文件 (供 GitHub Pages 使用)
-    # ==========================================
+    # --- 生成 docs JSON (保留给 GitHub Pages) ---
     docs_dir = "docs"
     if not os.path.exists(docs_dir):
         os.makedirs(docs_dir)
-    
-    # GitHub Actions 运行在 UTC 时区，需要转换为北京时间 (UTC+8)
-    beijing_time = datetime.utcnow() + timedelta(hours=8)
-    
-    # 计算买卖信号状态
-    if rsi < RSI_BUY_THRESHOLD:
-        signal = "买入"
-        signal_color = "#22c55e"  # 绿色
-    elif rsi > RSI_SELL_THRESHOLD:
-        signal = "卖出"
-        signal_color = "#ef4444"  # 红色
-    else:
-        signal = "持有"
-        signal_color = "#3b82f6"  # 蓝色
-    
-    backtest_summary = load_backtest_summary()
-    dynamic_params = load_dynamic_params()
-    dynamic_signal = compute_dynamic_signal(rsi, market_df["close"] if market_df is not None else None, dynamic_params)
 
-    data = {
+    beijing_time = datetime.utcnow() + timedelta(hours=8)
+    timestamp = beijing_time.strftime("%Y-%m-%d %H:%M:%S") + " (北京时间)"
+
+    data_json = {
         "etf_code": ETF_CODE,
         "etf_name": ETF_NAME,
         "rsi": round(rsi, 2),
-        "rsi_period": RSI_PERIOD,
+        "rsi_period": dynamic_params["rsi_period"],
         "market_date": latest_date,
         "price": round(price, 4) if price else None,
-        "buy_threshold": RSI_BUY_THRESHOLD,
-        "sell_threshold": RSI_SELL_THRESHOLD,
+        "buy_threshold": buy_th,
+        "sell_threshold": sell_th,
         "signal": signal,
-        "signal_color": signal_color,
-        "strategy": f"RSI({RSI_PERIOD}) EMA {RSI_BUY_THRESHOLD}/{RSI_SELL_THRESHOLD}",
-        "backtest_return": f"{backtest_summary['classic_total']:.2f}%" if backtest_summary["classic_total"] is not None else "--",
-        "backtest_annual": f"{backtest_summary['classic_annual']:.2f}%" if backtest_summary["classic_annual"] is not None else "--",
-        "timestamp": beijing_time.strftime("%Y-%m-%d %H:%M:%S") + " (北京时间)"
+        "signal_color": dynamic_signal["signal_color"],
+        "strategy": "RSI(%d) + Vol dynamic" % dynamic_params["rsi_period"],
+        "backtest_return": bt_return,
+        "backtest_annual": bt_annual,
+        "timestamp": timestamp,
     }
-    
-    with open(os.path.join(docs_dir, "data.json"), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    print(f"静态数据已保存至 {docs_dir}/data.json")
 
-    dynamic_data = {
+    with open(os.path.join(docs_dir, "data.json"), "w", encoding="utf-8") as f:
+        json.dump(data_json, f, ensure_ascii=False, indent=2)
+
+    dynamic_data_json = {
         "etf_code": ETF_CODE,
         "etf_name": ETF_NAME,
         "market_date": latest_date,
@@ -417,54 +287,21 @@ def main():
         "vol_window": dynamic_params["vol_window"],
         "k_vol": dynamic_params["k_vol"],
         "vol_anchor": dynamic_params["vol_anchor"],
-        "volatility": dynamic_signal["volatility"] if dynamic_signal else None,
-        "buy_threshold": dynamic_signal["buy_threshold"] if dynamic_signal else None,
-        "sell_threshold": dynamic_signal["sell_threshold"] if dynamic_signal else None,
-        "signal": dynamic_signal["signal"] if dynamic_signal else "未知",
-        "signal_color": dynamic_signal["signal_color"] if dynamic_signal else "#8a8070",
-        "backtest_return": f"{backtest_summary['dynamic_total']:.2f}%" if backtest_summary["dynamic_total"] is not None else "--",
-        "backtest_annual": f"{backtest_summary['dynamic_annual']:.2f}%" if backtest_summary["dynamic_annual"] is not None else "--",
-        "timestamp": beijing_time.strftime("%Y-%m-%d %H:%M:%S") + " (北京时间)"
+        "volatility": vol,
+        "buy_threshold": buy_th,
+        "sell_threshold": sell_th,
+        "signal": signal,
+        "signal_color": dynamic_signal["signal_color"],
+        "backtest_return": bt_return,
+        "backtest_annual": bt_annual,
+        "timestamp": timestamp,
     }
 
     with open(os.path.join(docs_dir, "dynamic_data.json"), "w", encoding="utf-8") as f:
-        json.dump(dynamic_data, f, ensure_ascii=False, indent=2)
-    print(f"动态信号数据已保存至 {docs_dir}/dynamic_data.json")
+        json.dump(dynamic_data_json, f, ensure_ascii=False, indent=2)
 
-    # ==========================================
-    # 动态注入订阅服务地址 (从环境变量)
-    # ==========================================
-    subscribe_worker_url = os.environ.get("SUBSCRIBE_WORKER_URL")
-    formspree_id = os.environ.get("FORMSPREE_ID")
-    
-    index_path = os.path.join(docs_dir, "index.html")
-    if os.path.exists(index_path):
-        try:
-            with open(index_path, "r", encoding="utf-8") as f:
-                content = f.read()
-            
-            updated = False
-            
-            # 注入 Worker URL
-            if subscribe_worker_url and "__SUBSCRIBE_WORKER_URL__" in content:
-                content = content.replace("__SUBSCRIBE_WORKER_URL__", subscribe_worker_url)
-                print(f"已注入 Worker URL: {subscribe_worker_url}")
-                updated = True
-            
-            # 注入 Formspree ID (备用方案)
-            if formspree_id and "__FORMSPREE_ID__" in content:
-                content = content.replace("__FORMSPREE_ID__", formspree_id)
-                print(f"已注入 Formspree ID: {formspree_id}")
-                updated = True
-            
-            if updated:
-                with open(index_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                print("index.html 更新完成")
-            else:
-                print("index.html 中未找到需要替换的占位符，跳过。")
-        except Exception as e:
-            print(f"更新 index.html 失败: {e}")
+    print("docs JSON updated.")
+
 
 if __name__ == "__main__":
     main()
