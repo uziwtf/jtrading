@@ -152,9 +152,12 @@ def fetch_rsi_and_price(params):
         print("insufficient data")
         return None, None, None, None
 
-    df["rsi"] = calculate_rsi_ema(df["close"], rsi_period)
+    # 只用最近60行计算RSI，与原策略保持一致
+    df_rsi = df.tail(60).reset_index(drop=True)
 
-    latest = df.iloc[-1]
+    df_rsi["rsi"] = calculate_rsi_ema(df_rsi["close"], rsi_period)
+
+    latest = df_rsi.iloc[-1]
     rsi_value = latest["rsi"]
     latest_price = latest["close"]
     latest_date = latest["date"].strftime("%Y-%m-%d")
@@ -165,7 +168,7 @@ def fetch_rsi_and_price(params):
 
     print("RSI(%d) = %.2f | price = %.4f | date = %s" % (
         rsi_period, rsi_value, latest_price, latest_date))
-    return rsi_value, latest_price, latest_date, df
+    return rsi_value, latest_price, latest_date, df_rsi
 
 
 # ==========================================
