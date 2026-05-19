@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JTrading - 运行监控</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2218%22 fill=%22%23b08030%22/><text x=%2250%22 y=%2265%22 font-size=%2248%22 font-weight=%22600%22 fill=%22%23fff%22 text-anchor=%22middle%22>JT</text></svg>">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #c9a962;
+            --primary-light: #d6bd82;
+            --primary-dark: #9d814a;
+            --success-color: #5a8a6a;
+            --warning-color: #a05050;
+            --neutral-color: #8a8070;
+            --bg-color: #0f0e10;
+            --card-bg: #19181b;
+            --text-color: #f3eee3;
+            --text-secondary: #a09888;
+            --border-color: #2f2d31;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container { max-width: 960px; margin: 0 auto; }
+        header { margin-bottom: 24px; }
+        header h1 {
+            font-size: 1.4rem;
+            font-weight: 700;
+            margin: 0 0 4px;
+        }
+        header .subtitle {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+        .nav {
+            margin-bottom: 24px;
+            display: flex;
+            gap: 12px;
+        }
+        .nav a {
+            padding: 8px 16px;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.85rem;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .nav a:hover, .nav a.active {
+            border-color: var(--primary-color);
+            color: var(--primary-color);
+        }
+        .nav a.active { background: rgba(201,169,98,0.08); }
+
+        /* Current status card */
+        .status-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 16px;
+            margin-top: 16px;
+        }
+        .status-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .status-label {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .status-value {
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+        .notification-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 99px;
+            font-size: 0.8rem;
+            font-weight: 700;
+        }
+        .badge-send {
+            background: rgba(90,138,106,0.15);
+            color: var(--success-color);
+            border: 1px solid rgba(90,138,106,0.35);
+        }
+        .badge-skip {
+            background: rgba(138,128,112,0.12);
+            color: var(--neutral-color);
+            border: 1px solid rgba(138,128,112,0.3);
+        }
+        .reason-text {
+            margin-top: 10px;
+            padding: 10px 14px;
+            background: rgba(255,255,255,0.02);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            font-size: 0.85rem;
+            line-height: 1.5;
+            color: var(--text-color);
+        }
+
+        /* Table */
+        .table-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .table-card h2 {
+            font-size: 1rem;
+            margin: 0 0 16px;
+            font-weight: 700;
+        }
+        .table-wrap {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.82rem;
+        }
+        th {
+            text-align: left;
+            padding: 10px 10px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+            white-space: nowrap;
+        }
+        td {
+            padding: 10px 10px;
+            border-bottom: 1px solid rgba(47,45,49,0.5);
+            white-space: nowrap;
+        }
+        tr:hover td { background: rgba(201,169,98,0.03); }
+        .signal-tag {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 99px;
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+        .signal-buy {
+            color: var(--success-color);
+            background: rgba(90,138,106,0.15);
+            border: 1px solid rgba(90,138,106,0.3);
+        }
+        .signal-sell {
+            color: var(--warning-color);
+            background: rgba(160,80,80,0.15);
+            border: 1px solid rgba(160,80,80,0.3);
+        }
+        .signal-hold {
+            color: var(--neutral-color);
+            background: rgba(138,128,112,0.12);
+            border: 1px solid rgba(138,128,112,0.25);
+        }
+        .empty-state {
+            text-align: center;
+            padding: 40px 20px;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        .footer {
+            text-align: center;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-top: 30px;
+            padding-bottom: 20px;
+        }
+        .footer a { color: var(--primary-color); text-decoration: none; }
+
+        @media (max-width: 600px) {
+            .status-grid { grid-template-columns: repeat(2, 1fr); }
+            th, td { padding: 8px 6px; font-size: 0.75rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>运行监控</h1>
+            <div class="subtitle">GitHub Actions 每次运行的信号与通知决策记录</div>
+        </header>
+
+        <nav class="nav">
+            <a href="index.html">信号看板</a>
+            <a href="monitor.html" class="active">运行监控</a>
+            <a href="backtest.html">经典回测</a>
+            <a href="backtest_dynamic.html">动态调优</a>
+        </nav>
+
+        <!-- Current run status -->
+        <div class="status-card" id="current-status" style="display:none;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
+                <span style="font-size:1rem; font-weight:700;">最新运行</span>
+                <span id="current-notification-badge" class="notification-badge"></span>
+                <span id="current-signal-tag" class="signal-tag"></span>
+            </div>
+            <div id="current-time" class="status-label" style="margin-bottom:8px;"></div>
+            <div class="status-grid">
+                <div class="status-item">
+                    <div class="status-label">RSI</div>
+                    <div class="status-value" id="current-rsi">--</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">价格</div>
+                    <div class="status-value" id="current-price">--</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">买入阈值</div>
+                    <div class="status-value" id="current-buy-th">--</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">卖出阈值</div>
+                    <div class="status-value" id="current-sell-th">--</div>
+                </div>
+                <div class="status-item">
+                    <div class="status-label">波动率</div>
+                    <div class="status-value" id="current-vol">--</div>
+                </div>
+            </div>
+            <div class="reason-text" id="current-reason" style="display:none;"></div>
+        </div>
+
+        <!-- History table -->
+        <div class="table-card">
+            <h2>运行历史（最近 30 次）</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>时间</th>
+                            <th>日期</th>
+                            <th>RSI</th>
+                            <th>信号</th>
+                            <th>买入阈值</th>
+                            <th>卖出阈值</th>
+                            <th>波动率</th>
+                            <th>通知</th>
+                            <th>决策原因</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body">
+                        <tr><td colspan="9" class="empty-state">加载中...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="footer">
+            <div style="margin-bottom:8px;">Powered by <a href="https://github.com/features/actions" target="_blank">GitHub Actions</a> & <a href="https://pages.github.com/" target="_blank">Pages</a></div>
+            <div><a href="https://github.com/uziWTF/JTrading" target="_blank">GitHub 源码</a></div>
+        </div>
+    </div>
+
+    <script>
+        function signalClass(signal) {
+            if (signal === '买入') return 'signal-buy';
+            if (signal === '卖出') return 'signal-sell';
+            return 'signal-hold';
+        }
+
+        function badgeClass(decision) {
+            if (decision === 'send') return 'badge-send';
+            return 'badge-skip';
+        }
+
+        function badgeText(decision) {
+            if (decision === 'send') return '已发送';
+            return '未发送';
+        }
+
+        function formatDate(ts) {
+            if (!ts) return '--';
+            // ts: "2026-05-19 18:49:53 (北京时间)"
+            return ts.replace(' (北京时间)', '').replace(' (GitHub Actions)', '').replace(' (weekly backtest)', '');
+        }
+
+        async function fetchJsonIfOk(path) {
+            try {
+                const res = await fetch(path);
+                if (!res.ok) return null;
+                return await res.json();
+            } catch { return null; }
+        }
+
+        async function loadMonitor() {
+            const data = await fetchJsonIfOk('monitor.json');
+            const tbody = document.getElementById('history-body');
+
+            if (!data || !data.runs || data.runs.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="9" class="empty-state">暂无运行记录</td></tr>';
+                return;
+            }
+
+            // Fill current status
+            const latest = data.runs[0];
+            document.getElementById('current-status').style.display = '';
+            document.getElementById('current-rsi').textContent = latest.rsi !== null && latest.rsi !== undefined ? Number(latest.rsi).toFixed(2) : '--';
+            document.getElementById('current-price').textContent = latest.price !== null && latest.price !== undefined ? '¥' + Number(latest.price).toFixed(4) : '--';
+            document.getElementById('current-buy-th').textContent = latest.buy_threshold !== null && latest.buy_threshold !== undefined ? Number(latest.buy_threshold).toFixed(2) : '--';
+            document.getElementById('current-sell-th').textContent = latest.sell_threshold !== null && latest.sell_threshold !== undefined ? Number(latest.sell_threshold).toFixed(2) : '--';
+            document.getElementById('current-vol').textContent = latest.volatility !== null && latest.volatility !== undefined ? Number(latest.volatility).toFixed(2) + '%' : '--';
+            document.getElementById('current-time').textContent = formatDate(latest.timestamp);
+
+            const badge = document.getElementById('current-notification-badge');
+            badge.className = 'notification-badge ' + badgeClass(latest.notification_decision);
+            badge.textContent = badgeText(latest.notification_decision);
+
+            const sigTag = document.getElementById('current-signal-tag');
+            sigTag.className = 'signal-tag ' + signalClass(latest.signal);
+            sigTag.textContent = latest.signal || '--';
+
+            const reasonEl = document.getElementById('current-reason');
+            if (latest.notification_reason) {
+                reasonEl.style.display = '';
+                reasonEl.textContent = latest.notification_reason;
+            }
+
+            // Fill table
+            let html = '';
+            data.runs.forEach(function(run) {
+                var ts = formatDate(run.timestamp);
+                var shortTime = ts.split(' ')[1] || ts;
+                html += '<tr>';
+                html += '<td>' + shortTime + '</td>';
+                html += '<td>' + (run.market_date || '--') + '</td>';
+                html += '<td>' + (run.rsi !== null && run.rsi !== undefined ? Number(run.rsi).toFixed(2) : '--') + '</td>';
+                html += '<td><span class="signal-tag ' + signalClass(run.signal) + '">' + (run.signal || '--') + '</span></td>';
+                html += '<td>' + (run.buy_threshold !== null && run.buy_threshold !== undefined ? Number(run.buy_threshold).toFixed(2) : '--') + '</td>';
+                html += '<td>' + (run.sell_threshold !== null && run.sell_threshold !== undefined ? Number(run.sell_threshold).toFixed(2) : '--') + '</td>';
+                html += '<td>' + (run.volatility !== null && run.volatility !== undefined ? Number(run.volatility).toFixed(2) + '%' : '--') + '</td>';
+                html += '<td><span class="notification-badge ' + badgeClass(run.notification_decision) + '">' + badgeText(run.notification_decision) + '</span></td>';
+                html += '<td style="white-space:normal;min-width:180px;">' + (run.notification_reason || '--') + '</td>';
+                html += '</tr>';
+            });
+            tbody.innerHTML = html;
+        }
+
+        loadMonitor();
+    </script>
+</body>
+</html>

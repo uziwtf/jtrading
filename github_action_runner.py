@@ -258,6 +258,54 @@ def main():
     beijing_time = datetime.utcnow() + timedelta(hours=8)
     timestamp = beijing_time.strftime("%Y-%m-%d %H:%M:%S") + " (北京时间)"
 
+    # === 生成 monitor.json（运行监控数据）===
+    # 通知决策逻辑与上面保持一致
+    notification_decision = "skip"
+    notification_reason = ""
+
+    if signal == "买入":
+        notification_decision = "send"
+        notification_reason = "RSI低于动态买入阈值，触发买入信号"
+    elif signal == "卖出":
+        notification_decision = "send"
+        notification_reason = "RSI高于动态卖出阈值，触发卖出信号"
+    elif is_wednesday_beijing():
+        notification_decision = "send"
+        notification_reason = "周三心跳包，策略正常运行"
+    else:
+        notification_decision = "skip"
+        notification_reason = "信号为仓位不动，且非周三，不发送通知"
+
+    # 读取历史记录
+    monitor_json_path = os.path.join(docs_dir, "monitor.json")
+    try:
+        with open(monitor_json_path, "r", encoding="utf-8") as f:
+            monitor_history = json.load(f)
+    except:
+        monitor_history = {"runs": []}
+
+    # 添加本次运行记录
+    run_record = {
+        "timestamp": timestamp,
+        "rsi": round(rsi, 2),
+        "price": round(price, 4) if price else None,
+        "market_date": latest_date,
+        "signal": signal,
+        "buy_threshold": buy_th,
+        "sell_threshold": sell_th,
+        "volatility": vol,
+        "notification_decision": notification_decision,
+        "notification_reason": notification_reason,
+    }
+    monitor_history["runs"].insert(0, run_record)
+
+    # 保留最近 30 条记录
+    monitor_history["runs"] = monitor_history["runs"][:30]
+
+    with open(monitor_json_path, "w", encoding="utf-8") as f:
+        json.dump(monitor_history, f, ensure_ascii=False, indent=2)
+
+    # === 生成 data.json（前端展示用）===
     data_json = {
         "etf_code": ETF_CODE,
         "etf_name": ETF_NAME,
