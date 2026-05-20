@@ -1,6 +1,6 @@
 """
 红利低波ETF (512890) RSI策略回测
-策略：RSI(15) < 32 买入，RSI(15) > 77 卖出
+策略：RSI(15) 动态阈值（波动率调整），或固定阈值 RSI(15) < 32 买入，> 77 卖出
 
 注意：512890是累积型ETF，分红已自动再投资体现在价格中，无需额外处理分红
 """
@@ -19,6 +19,18 @@ RSI_PERIOD = 15  # 优化后：15日（原14日）
 RSI_BUY_THRESHOLD = 32  # 优化后：32（原66）
 RSI_SELL_THRESHOLD = 77  # 优化后：77（原81）
 INITIAL_CAPITAL = 100000  # 初始资金10万
+
+# 动态阈值模式
+USE_DYNAMIC_THRESHOLD = True
+RSI_BUY_BASE = 34
+RSI_SELL_BASE = 71
+VOL_WINDOW = 55
+K_VOL = -0.423847
+VOL_ANCHOR = 15.0
+BUY_THRESHOLD_MIN = 20
+BUY_THRESHOLD_MAX = 50
+SELL_THRESHOLD_MIN = 60
+SELL_THRESHOLD_MAX = 90
 
 # 基准ETF配置
 BENCHMARK_ETFS = {
@@ -54,6 +66,22 @@ def calculate_rsi(prices, period=15):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
+
+
+def calculate_volatility(prices, window):
+    """年化波动率（百分比）"""
+    log_ret = np.log(prices / prices.shift(1))
+    vol = log_ret.rolling(window=window, min_periods=window).std() * np.sqrt(252) * 100
+    return vol
+
+
+def calculate_dynamic_thresholds(volatility, buy_base, sell_base, k_vol, vol_anchor,
+                                 buy_min, buy_max, sell_min, sell_max):
+    """计算动态RSI阈值"""
+    vol_diff = volatility - vol_anchor
+    buy_threshold = (buy_base - k_vol * vol_diff).clip(buy_min, buy_max)
+    sell_threshold = (sell_base + k_vol * vol_diff).clip(sell_min, sell_max)
+    return buy_threshold, sell_threshold
 
 
 # ============ 获取数据 ============
@@ -114,6 +142,13 @@ def run_backtest(df, initial_capital=INITIAL_CAPITAL):
     """
     df = df.copy()
     df['rsi'] = calculate_rsi(df['close'], RSI_PERIOD)
+
+    if USE_DYNAMIC_THRESHOLD:
+        df['volatility'] = calculate_volatility(df['close'], VOL_WINDOW)
+        df['buy_threshold'], df['sell_threshold'] = calculate_dynamic_thresholds(
+            df['volatility'], RSI_BUY_BASE, RSI_SELL_BASE, K_VOL, VOL_ANCHOR,
+            BUY_THRESHOLD_MIN, BUY_THRESHOLD_MAX, SELL_THRESHOLD_MIN, SELL_THRESHOLD_MAX
+        )
     
     # 初始化
     cash = initial_capital
@@ -129,9 +164,17 @@ def run_backtest(df, initial_capital=INITIAL_CAPITAL):
         rsi = row['rsi']
         date_str = date.strftime('%Y-%m-%d')
         
+        # 确定当前阈值
+        if USE_DYNAMIC_THRESHOLD:
+            buy_thresh = row['buy_threshold'] if pd.notna(row.get('buy_threshold')) else None
+            sell_thresh = row['sell_threshold'] if pd.notna(row.get('sell_threshold')) else None
+        else:
+            buy_thresh = RSI_BUY_THRESHOLD
+            sell_thresh = RSI_SELL_THRESHOLD
+
         # RSI信号判断
-        if pd.notna(rsi):
-            if rsi < RSI_BUY_THRESHOLD and position == 0:
+        if pd.notna(rsi) and buy_thresh is not None and sell_thresh is not None:
+            if rsi < buy_thresh and position == 0:
                 # 买入信号：满仓买入
                 shares_to_buy = int(cash / price / 100) * 100  # 整百份
                 if shares_to_buy > 0:
@@ -150,7 +193,7 @@ def run_backtest(df, initial_capital=INITIAL_CAPITAL):
                         'cash': cash
                     })
                     
-            elif rsi > RSI_SELL_THRESHOLD and position == 1:
+            elif rsi > sell_thresh and position == 1:
                 # 卖出信号：全部卖出
                 if shares > 0:
                     sell_shares = int(shares / 100) * 100  # 整百份
@@ -180,6 +223,9 @@ def run_backtest(df, initial_capital=INITIAL_CAPITAL):
             'date': date_str,
             'close': price,
             'rsi': rsi if pd.notna(rsi) else None,
+            'volatility': float(row['volatility']) if USE_DYNAMIC_THRESHOLD and pd.notna(row.get('volatility')) else None,
+            'buy_threshold': float(buy_thresh) if buy_thresh is not None else None,
+            'sell_threshold': float(sell_thresh) if sell_thresh is not None else None,
             'cash': cash,
             'shares': shares,
             'total_value': total_value,
@@ -342,7 +388,8 @@ def calculate_annual_return(total_return_pct, calendar_days):
 # ============ 主程序 ============
 def main():
     print("=" * 60)
-    print("红利低波ETF (512890) RSI策略回测")
+    mode = "动态阈值" if USE_DYNAMIC_THRESHOLD else "固定阈值"
+    print("红利低波ETF (512890) RSI策略回测 [%s]" % mode)
     print("=" * 60)
     
     # 1. 获取数据
@@ -452,7 +499,9 @@ def main():
         'meta': {
             'etf_code': ETF_CODE,
             'etf_name': ETF_NAME,
-            'strategy': f'RSI({RSI_PERIOD}) < {RSI_BUY_THRESHOLD} 买入, > {RSI_SELL_THRESHOLD} 卖出',
+            'strategy': 'RSI(%d) 动态阈值 [buy_base=%d, sell_base=%d, k_vol=%.6f, vol_window=%d]' % (
+                RSI_PERIOD, RSI_BUY_BASE, RSI_SELL_BASE, K_VOL, VOL_WINDOW
+            ) if USE_DYNAMIC_THRESHOLD else 'RSI(%d) < %d 买入, > %d 卖出' % (RSI_PERIOD, RSI_BUY_THRESHOLD, RSI_SELL_THRESHOLD),
             'initial_capital': INITIAL_CAPITAL,
             'start_date': strategy_stats['start_date'],
             'end_date': strategy_stats['end_date'],
