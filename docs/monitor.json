@@ -1,6 +1,18 @@
 {
   "runs": [
     {
+      "timestamp": "2026-06-16 20:28:40 (北京时间)",
+      "rsi": 39.48,
+      "price": 1.145,
+      "market_date": "2026-06-16",
+      "signal": "仓位不动",
+      "buy_threshold": 32.3,
+      "sell_threshold": 72.7,
+      "volatility": 10.36,
+      "notification_decision": "skip",
+      "notification_reason": "信号为仓位不动，且非周三，不发送通知"
+    },
+    {
       "timestamp": "2026-06-15 21:38:34 (北京时间)",
       "rsi": 45.89,
       "price": 1.161,
